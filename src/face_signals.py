@@ -12,6 +12,7 @@ are identical, so the EAR/smile geometry below is unchanged from the book.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -22,6 +23,8 @@ from mediapipe.tasks.python import vision as mp_vision
 from mediapipe.tasks.python import BaseOptions
 
 from .haar_5pt import _DEFAULT_MODEL_PATH
+
+logger = logging.getLogger(__name__)
 
 
 LEFT_EYE = (33, 160, 158, 133, 153, 144)
@@ -69,6 +72,7 @@ class FaceSignalExtractor:
         self.smile_off = smile_off
         self.low_ear_frames = 0
         self.smiling = False
+        self.was_eyes_closed = False
 
         options = mp_vision.FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
@@ -82,6 +86,7 @@ class FaceSignalExtractor:
     def reset(self) -> None:
         self.low_ear_frames = 0
         self.smiling = False
+        self.was_eyes_closed = False
 
     def close(self) -> None:
         self.landmarker.close()
@@ -101,6 +106,7 @@ class FaceSignalExtractor:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = self.landmarker.detect(mp_image)
         if not result.face_landmarks:
+            logger.debug("no landmarks found in locked-face ROI (bbox=%s)", bbox)
             return None
 
         rh, rw = roi.shape[:2]
@@ -115,21 +121,35 @@ class FaceSignalExtractor:
         ear = 0.5 * (left_ear + right_ear)
 
         blink = False
+        blink_held_frames = 0
         if ear < self.ear_threshold:
             self.low_ear_frames += 1
         else:
-            if self.blink_min_frames <= self.low_ear_frames <= self.blink_max_frames:
+            blink_held_frames = self.low_ear_frames
+            if self.blink_min_frames <= blink_held_frames <= self.blink_max_frames:
                 blink = True
             self.low_ear_frames = 0
         eyes_closed = self.low_ear_frames >= self.closed_frames
 
+        if blink:
+            logger.info("BLINK detected (ear=%.3f, held for %d frames)", ear, blink_held_frames)
+        if eyes_closed != self.was_eyes_closed:
+            logger.info("eyes %s (ear=%.3f)", "CLOSED" if eyes_closed else "OPEN", ear)
+            self.was_eyes_closed = eyes_closed
+
         face_width = max(distance(points[FACE_LEFT], points[FACE_RIGHT]), 1e-6)
         mouth_width = distance(points[MOUTH_LEFT], points[MOUTH_RIGHT])
         smile_score = mouth_width / face_width
+        was_smiling = self.smiling
         if self.smiling:
             self.smiling = smile_score >= self.smile_off
         else:
             self.smiling = smile_score >= self.smile_on
+        if self.smiling != was_smiling:
+            logger.info("smile %s (score=%.3f)", "ON" if self.smiling else "OFF", smile_score)
+
+        logger.debug("signals: ear=%.3f smile_score=%.3f eyes_closed=%s smiling=%s",
+                      ear, smile_score, eyes_closed, self.smiling)
 
         return FaceSignals(
             ear=ear,
