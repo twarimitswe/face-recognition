@@ -234,6 +234,13 @@ class HaarFaceMesh5pt:
         self.IDX_MOUTH_LEFT = 61
         self.IDX_MOUTH_RIGHT = 291
 
+        # Haar misses individual frames often even with a face held steady;
+        # briefly hold the last boxes across a miss instead of reporting zero
+        # faces, so downstream trackers don't flicker LOST every few frames.
+        self._last_haar_boxes = np.zeros((0, 4), dtype=np.int32)
+        self._missed_haar_frames = 0
+        self.haar_hold_frames = 2
+
     def close(self):
         self.landmarker.close()
 
@@ -246,8 +253,14 @@ class HaarFaceMesh5pt:
             minSize=self.min_size,
         )
         if faces is None or len(faces) == 0:
+            self._missed_haar_frames += 1
+            if self._missed_haar_frames <= self.haar_hold_frames:
+                return self._last_haar_boxes
             return np.zeros((0, 4), dtype=np.int32)
-        return faces.astype(np.int32)  # (x,y,w,h)
+
+        self._missed_haar_frames = 0
+        self._last_haar_boxes = faces.astype(np.int32)
+        return self._last_haar_boxes
 
     def _roi_landmarks_5pt(self, roi_bgr: np.ndarray) -> Optional[np.ndarray]:
         H, W = roi_bgr.shape[:2]
