@@ -12,6 +12,7 @@ Keys:
 """
 
 import argparse
+import logging
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -28,6 +29,8 @@ from .recognize import (
     HaarFaceMesh5pt,
     load_db_npz,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LockState(Enum):
@@ -103,12 +106,21 @@ class LockedFaceTracker:
         best_similarity = -1.0
         for face in faces:
             match = self.identity(frame, face)
+            logger.debug(
+                "acquire: candidate box=%s matched=%r similarity=%.3f distance=%.3f accepted=%s",
+                self.box(face), match.name, match.similarity, match.distance, match.accepted,
+            )
             if (
                 match.accepted
                 and match.name == self.target_name
                 and match.similarity > best_similarity
             ):
                 best, best_similarity = face, match.similarity
+        if best is not None:
+            logger.info(
+                "acquired target %r at box=%s similarity=%.3f",
+                self.target_name, self.box(best), best_similarity,
+            )
         return best
 
     def associate(self, faces):
@@ -127,34 +139,48 @@ class LockedFaceTracker:
             score = overlap - 0.35 * displacement
             ranked.append((score, face))
         score, candidate = max(ranked, key=lambda item: item[0])
-        return candidate if score > -0.30 else None
+        chosen = candidate if score > -0.30 else None
+        logger.debug(
+            "associate: best_score=%.3f box=%s -> %s",
+            score, self.box(candidate), "kept" if chosen is not None else "rejected",
+        )
+        return chosen
 
     def update(self, frame):
         self.frame_index += 1
         faces = self.detector.detect(frame, max_faces=8)
+        logger.debug("frame=%d state=%s faces_detected=%d", self.frame_index, self.state.name, len(faces))
 
         if self.state == LockState.SEARCHING:
             candidate = self.acquire(frame, faces)
         else:
             candidate = self.associate(faces)
-            if (
-                candidate is not None
-                and (self.state == LockState.LOST
-                     or self.frame_index % self.verify_every == 0)
-                and not self.target_is_verified(frame, candidate)
-            ):
-                candidate = None
+            due_for_verify = self.state == LockState.LOST or self.frame_index % self.verify_every == 0
+            if candidate is not None and due_for_verify:
+                verified = self.target_is_verified(frame, candidate)
+                logger.debug("periodic re-verification: verified=%s", verified)
+                if not verified:
+                    candidate = None
 
         if candidate is None:
             self.lost_frames += 1
+            if self.last_box is not None and self.state != LockState.LOST:
+                logger.info("target %r LOST (frame=%d, was at %s)", self.target_name, self.frame_index, self.last_box)
             if self.last_box is not None:
                 self.state = LockState.LOST
             if self.lost_frames > self.lost_timeout:
+                if self.state == LockState.LOST:
+                    logger.info(
+                        "target %r missing for %d frames (> lost_timeout=%d) -> back to SEARCHING",
+                        self.target_name, self.lost_frames, self.lost_timeout,
+                    )
                 self.state = LockState.SEARCHING
                 self.last_box = None
                 self.smooth_center = None
             return None, None
 
+        if self.state != LockState.LOCKED:
+            logger.info("target %r LOCKED (frame=%d)", self.target_name, self.frame_index)
         self.state = LockState.LOCKED
         self.lost_frames = 0
         self.last_box = self.box(candidate)
@@ -165,7 +191,13 @@ class LockedFaceTracker:
         else:
             a = self.ema_alpha
             self.smooth_center = a * raw_center + (1.0 - a) * self.smooth_center
-        return candidate, self.position_signal(frame.shape)
+        signal = self.position_signal(frame.shape)
+        logger.debug(
+            "position: raw_center=%s smoothed=%s error=(%.3f,%.3f) H=%s V=%s",
+            raw_center, self.smooth_center, signal.error_x, signal.error_y,
+            signal.horizontal, signal.vertical,
+        )
+        return candidate, signal
 
     def position_signal(self, shape) -> TrackingSignal:
         height, width = shape[:2]
@@ -196,7 +228,15 @@ def main():
     parser.add_argument("--target", required=True, help="enrolled identity to lock")
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--threshold", type=float, default=0.34)
+    parser.add_argument("--debug", action="store_true",
+                         help="verbose per-frame logs: detection, position, lock state, smile/blink")
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     detector = HaarFaceMesh5pt(min_size=(70, 70), debug=False)
     embedder = ArcFaceEmbedderONNX(
@@ -214,6 +254,11 @@ def main():
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         raise RuntimeError("Camera not available")
+
+    logger.info(
+        "face_tracking started: target=%r camera=%d threshold=%.2f",
+        args.target, args.camera, args.threshold,
+    )
 
     blink_total = 0
     try:
@@ -236,6 +281,7 @@ def main():
                 if face_state is not None:
                     if face_state.blink:
                         blink_total += 1
+                        logger.debug("blink_total=%d", blink_total)
 
                     expression = "SMILE" if face_state.smiling else "NEUTRAL"
                     eye_text = "EYES CLOSED" if face_state.eyes_closed else "EYES OPEN"
