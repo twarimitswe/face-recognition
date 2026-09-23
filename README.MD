@@ -119,7 +119,26 @@ Detects and labels every face in frame against `data/db/face_db.npz`.
 - **+ / -** - adjust the match distance threshold live
 - **d** - toggle a debug overlay
 
-## 9. `src/track.py` - servo face-following (needs the ESP32 hardware)
+## 9. `src/face_tracking.py` - identity lock, tracking, and gestures (no servo)
+
+```
+python -m src.face_tracking --target "SomeEnrolledName"
+```
+
+Locks onto one enrolled identity and tracks it with a small state machine
+(`SEARCHING` -> `LOCKED` -> `LOST` -> back to `SEARCHING` after a timeout),
+reusing `recognize.py`'s detector/embedder/matcher and `align.py`'s
+alignment rather than duplicating them. Between full ArcFace re-checks
+(every `verify_every` frames) it just associates the nearest matching box
+(IoU + displacement) so it stays fast, and never transfers the lock to a
+different face crossing the frame. While locked, `src/face_signals.py`
+runs MediaPipe FaceLandmarker on the locked box only (never the full
+frame) to report smile, blink count, and eyes-open/closed. The window also
+shows normalized `error_x`/`error_y` and `LEFT/RIGHT/UP/DOWN/CENTER`
+labels - the same position signal `src/track.py` computes for the servo,
+here just displayed instead of driving hardware. Press `q` to quit.
+
+## 10. `src/track.py` - servo face-following (needs the ESP32 hardware)
 
 Requires `firmware/servo_tracker/servo_tracker.ino` flashed onto the ESP32
 first - see the firmware section below.
