@@ -138,6 +138,14 @@ shows normalized `error_x`/`error_y` and `LEFT/RIGHT/UP/DOWN/CENTER`
 labels - the same position signal `src/track.py` computes for the servo,
 here just displayed instead of driving hardware. Press `q` to quit.
 
+Add `--debug` for verbose logging (via the stdlib `logging` module) of
+every detection/tracking/signal step: per-frame face count and lock
+state, each acquire/associate candidate considered with its match
+similarity, every `LOCKED`/`LOST`/`SEARCHING` transition, the smoothed
+position and normalized error each frame, and every blink/smile/eye-state
+change with the EAR or smile score that triggered it. Without `--debug`
+only state-changing events are printed (quiet by default).
+
 ## 10. `src/track.py` - servo face-following (needs the ESP32 hardware)
 
 Requires `firmware/servo_tracker/servo_tracker.ino` flashed onto the ESP32
